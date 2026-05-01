@@ -1,10 +1,10 @@
 # Tiny Tapeout project information
 project:
-  title:        "Voting ASIC — MOD-02 Voter ID Validator"
-  author:       "Obafisayo"
+  title:        "Voting ASIC — Voter ID Validation System"
+  author:       "Obafisayo, Somto, Wisdom, David, Henry"
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "Checks a 20-bit voter ID against a hard-coded master list using an XNOR-AND comparator tree; result within 2 clock cycles."
-  language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
+  description:  "A digital voting machine ASIC with voter ID validation, duplicate detection, and vote tallying. MOD-02 (Voter ID Validator) uses an XNOR-AND comparator tree to check 20-bit voter IDs against a hard-coded master list."
+  language:     "Verilog"
   clock_hz:     50000000  # 50 MHz (CLOCK_PERIOD = 20 ns in src/config.json)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
@@ -19,19 +19,21 @@ project:
   source_files:
     - "project.v"
     - "voter_id_validator.v"
+    - "duplicate_checker.v"
+    - "vote_tally_counter.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
-  # Inputs
-  ui[0]: "voter_id[0]"
-  ui[1]: "voter_id[1]"
-  ui[2]: "voter_id[2]"
-  ui[3]: "voter_id[3]"
-  ui[4]: "voter_id[4]"
-  ui[5]: "voter_id[5]"
-  ui[6]: "voter_id[6]"
-  ui[7]: "voter_id[7]"
+  # Inputs — carry the voter ID data byte during byte-write cycles
+  ui[0]: "voter_id[0] / data_byte[0]"
+  ui[1]: "voter_id[1] / data_byte[1]"
+  ui[2]: "voter_id[2] / data_byte[2]"
+  ui[3]: "voter_id[3] / data_byte[3]"
+  ui[4]: "voter_id[4] / data_byte[4]"
+  ui[5]: "voter_id[5] / data_byte[5]"
+  ui[6]: "voter_id[6] / data_byte[6]"
+  ui[7]: "voter_id[7] / data_byte[7]"
 
   # Outputs
   uo[0]: "id_valid"
@@ -44,6 +46,9 @@ pinout:
   uo[7]: ""
 
   # Bidirectional pins (all configured as inputs, uio_oe = 0)
+  # byte_sel selects which portion of the 20-bit voter ID is being loaded:
+  #   2'b01 = load voter_id[7:0] from ui_in
+  #   2'b10 = load voter_id[15:8] from ui_in and voter_id[19:16] from uio[7:4]
   uio[0]: "byte_sel[0]"
   uio[1]: "byte_sel[1]"
   uio[2]: "byte_write"
