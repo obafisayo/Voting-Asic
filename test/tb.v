@@ -1,7 +1,7 @@
 `default_nettype none
 `timescale 1ns / 1ps
 
-/* This testbench just instantiates the module and makes some convenient wires
+/* This testbench instantiates the module and makes some convenient wires
    that can be driven / tested by the cocotb test.py.
 */
 module tb ();
@@ -13,10 +13,12 @@ module tb ();
     #1;
   end
 
-  // Wire up the inputs and outputs:
+  // ── Shared clock and reset ──────────────────────────────────
   reg clk;
   reg rst_n;
   reg ena;
+
+  // ── MOD-02: Voter ID Validator (via Tiny Tapeout wrapper) ───
   reg [7:0] ui_in;
   reg [7:0] uio_in;
   wire [7:0] uo_out;
@@ -27,23 +29,49 @@ module tb ();
   wire VGND = 1'b0;
 `endif
 
-  // Replace tt_um_example with your module name:
   tt_um_example user_project (
-
-      // Include power ports for the Gate Level test:
 `ifdef GL_TEST
       .VPWR(VPWR),
       .VGND(VGND),
 `endif
+      .ui_in  (ui_in),
+      .uo_out (uo_out),
+      .uio_in (uio_in),
+      .uio_out(uio_out),
+      .uio_oe (uio_oe),
+      .ena    (ena),
+      .clk    (clk),
+      .rst_n  (rst_n)
+  );
 
-      .ui_in  (ui_in),    // Dedicated inputs
-      .uo_out (uo_out),   // Dedicated outputs
-      .uio_in (uio_in),   // IOs: Input path
-      .uio_out(uio_out),  // IOs: Output path
-      .uio_oe (uio_oe),   // IOs: Enable path (active high: 0=input, 1=output)
-      .ena    (ena),      // enable - goes high when design is selected
-      .clk    (clk),      // clock
-      .rst_n  (rst_n)     // not reset
+  // ── MOD-03: Duplicate Vote Checker ─────────────────────────
+  reg  [19:0] dc_voter_id;
+  reg         dc_check_en;
+  wire        dc_is_duplicate;
+  wire        dc_check_done;
+
+  duplicate_checker dc_inst (
+      .voter_id_in (dc_voter_id),
+      .check_en    (dc_check_en),
+      .clk         (clk),
+      .rst_n       (rst_n),
+      .is_duplicate(dc_is_duplicate),
+      .check_done  (dc_check_done)
+  );
+
+  // ── MOD-04: Vote Tally Counter ──────────────────────────────
+  reg        vtc_vote_en;
+  reg  [2:0] vtc_candidate_sel;
+  wire       vtc_vote_cast;
+  wire [31:0] vtc_tally_out;
+
+  vote_tally_counter vtc_inst (
+      .clk          (clk),
+      .rst_n        (rst_n),
+      .vote_en      (vtc_vote_en),
+      .candidate_sel(vtc_candidate_sel),
+      .vote_cast    (vtc_vote_cast),
+      .tally_out    (vtc_tally_out)
   );
 
 endmodule
