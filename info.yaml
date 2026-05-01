@@ -1,11 +1,11 @@
 # Tiny Tapeout project information
 project:
-  title:        ""      # Project title
-  author:       ""      # Your name
+  title:        "Voting ASIC — MOD-02 Voter ID Validator"
+  author:       "Obafisayo"
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  ""      # One line description of what your project does
+  description:  "Checks a 20-bit voter ID against a hard-coded master list using an XNOR-AND comparator tree; result within 2 clock cycles."
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
+  clock_hz:     50000000  # 50 MHz (CLOCK_PERIOD = 20 ns in src/config.json)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
@@ -18,23 +18,24 @@ project:
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "project.v"
+    - "voter_id_validator.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
   # Inputs
-  ui[0]: ""
-  ui[1]: ""
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: ""
-  ui[5]: ""
-  ui[6]: ""
-  ui[7]: ""
+  ui[0]: "voter_id[0]"
+  ui[1]: "voter_id[1]"
+  ui[2]: "voter_id[2]"
+  ui[3]: "voter_id[3]"
+  ui[4]: "voter_id[4]"
+  ui[5]: "voter_id[5]"
+  ui[6]: "voter_id[6]"
+  ui[7]: "voter_id[7]"
 
   # Outputs
-  uo[0]: ""
-  uo[1]: ""
+  uo[0]: "id_valid"
+  uo[1]: "validate_done"
   uo[2]: ""
   uo[3]: ""
   uo[4]: ""
@@ -42,15 +43,15 @@ pinout:
   uo[6]: ""
   uo[7]: ""
 
-  # Bidirectional pins
-  uio[0]: ""
-  uio[1]: ""
-  uio[2]: ""
-  uio[3]: ""
-  uio[4]: ""
-  uio[5]: ""
-  uio[6]: ""
-  uio[7]: ""
+  # Bidirectional pins (all configured as inputs, uio_oe = 0)
+  uio[0]: "byte_sel[0]"
+  uio[1]: "byte_sel[1]"
+  uio[2]: "byte_write"
+  uio[3]: "data_ready"
+  uio[4]: "voter_id[16]"
+  uio[5]: "voter_id[17]"
+  uio[6]: "voter_id[18]"
+  uio[7]: "voter_id[19]"
 
 # Do not change!
 yaml_version: 6
