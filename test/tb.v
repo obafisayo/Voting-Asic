@@ -44,6 +44,7 @@ module tb ();
       .rst_n  (rst_n)
   );
 
+`ifndef GL_TEST
   // ── MOD-03: Duplicate Vote Checker ─────────────────────────
   reg  [19:0] dc_voter_id;
   reg         dc_check_en;
@@ -73,5 +74,6 @@ module tb ();
       .vote_cast    (vtc_vote_cast),
       .tally_out    (vtc_tally_out)
   );
+`endif
 
 endmodule

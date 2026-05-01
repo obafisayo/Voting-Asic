@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: © 2024 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
+
+# True when running gate-level simulation (make GATES=yes)
+GL_TEST = os.environ.get("GATES", "no").lower() == "yes"
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -17,16 +21,17 @@ INVALID_IDS = [0x00000, 0xFFFFF, 0x12345, 0xA0005, 0xD0098]
 
 async def reset(dut):
     """Full reset: initialise every input to 0, hold rst_n low for 5 cycles."""
-    dut.ena.value               = 1
-    dut.ui_in.value             = 0
-    dut.uio_in.value            = 0
-    dut.dc_voter_id.value       = 0
-    dut.dc_check_en.value       = 0
-    dut.vtc_vote_en.value       = 0
-    dut.vtc_candidate_sel.value = 0
-    dut.rst_n.value             = 0
+    dut.ena.value    = 1
+    dut.ui_in.value  = 0
+    dut.uio_in.value = 0
+    if not GL_TEST:
+        dut.dc_voter_id.value       = 0
+        dut.dc_check_en.value       = 0
+        dut.vtc_vote_en.value       = 0
+        dut.vtc_candidate_sel.value = 0
+    dut.rst_n.value  = 0
     await ClockCycles(dut.clk, 5)
-    dut.rst_n.value             = 1
+    dut.rst_n.value  = 1
     await ClockCycles(dut.clk, 2)
 
 
@@ -160,7 +165,7 @@ async def test_back_to_back(dut):
 
 # ── MOD-03 tests ───────────────────────────────────────────────────────────────
 
-@cocotb.test()
+@cocotb.test(skip=GL_TEST)
 async def test_duplicate_checker_first_vote(dut):
     """MOD-03: a voter's first submission must NOT be flagged as duplicate."""
     dut._log.info("test_duplicate_checker_first_vote")
@@ -177,7 +182,7 @@ async def test_duplicate_checker_first_vote(dut):
         dut._log.info(f"MOD-03 PASS  {vid:#07x}  is_duplicate={is_dup} (first vote)")
 
 
-@cocotb.test()
+@cocotb.test(skip=GL_TEST)
 async def test_duplicate_checker_second_vote(dut):
     """MOD-03: a voter who already voted must be flagged as duplicate."""
     dut._log.info("test_duplicate_checker_second_vote")
@@ -195,7 +200,7 @@ async def test_duplicate_checker_second_vote(dut):
         dut._log.info(f"MOD-03 PASS  {vid:#07x}  is_duplicate={is_dup} (second vote blocked)")
 
 
-@cocotb.test()
+@cocotb.test(skip=GL_TEST)
 async def test_duplicate_checker_new_vs_repeat(dut):
     """MOD-03: fresh IDs pass while already-voted IDs are blocked in the same session."""
     dut._log.info("test_duplicate_checker_new_vs_repeat")
@@ -216,7 +221,7 @@ async def test_duplicate_checker_new_vs_repeat(dut):
 
 # ── MOD-04 tests ───────────────────────────────────────────────────────────────
 
-@cocotb.test()
+@cocotb.test(skip=GL_TEST)
 async def test_vote_tally_single_candidate(dut):
     """MOD-04: repeated votes for the same candidate accumulate correctly."""
     dut._log.info("test_vote_tally_single_candidate")
@@ -233,7 +238,7 @@ async def test_vote_tally_single_candidate(dut):
         dut._log.info(f"MOD-04 PASS  candidate=0  tally={tally}")
 
 
-@cocotb.test()
+@cocotb.test(skip=GL_TEST)
 async def test_vote_tally_multiple_candidates(dut):
     """MOD-04: votes for different candidates go into separate counters."""
     dut._log.info("test_vote_tally_multiple_candidates")
@@ -255,7 +260,7 @@ async def test_vote_tally_multiple_candidates(dut):
     dut._log.info(f"MOD-04 PASS  candidate=1 tally={tally1}, candidate=5 tally={tally5}")
 
 
-@cocotb.test()
+@cocotb.test(skip=GL_TEST)
 async def test_vote_tally_no_spurious_votes(dut):
     """MOD-04: holding vote_en high after the rising edge must NOT double-count."""
     dut._log.info("test_vote_tally_no_spurious_votes")
