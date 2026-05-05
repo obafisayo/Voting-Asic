@@ -447,10 +447,10 @@ async def test_uart_data_ready_one_cycle(dut):
     await RisingEdge(dut.uart_data_ready_out)
     assert int(dut.uart_data_ready_out.value) == 1, "data_ready not high at rising edge"
 
-    # After exactly one more clock cycle data_ready must fall:
-    # the always block always starts with  data_ready <= 0, so
-    # the posedge after it was set will clear it.
-    await ClockCycles(dut.clk, 1)
+    # data_ready was set at posedge P's NBA.  The always block unconditionally
+    # schedules data_ready <= 0 at posedge P+1.  We need ReadWrite P+2 to see
+    # that NBA committed; ReadWrite P+1 is before P+1's NBAs so still reads 1.
+    await ClockCycles(dut.clk, 2)
     val = int(dut.uart_data_ready_out.value)
     assert val == 0, f"data_ready should be 0 after 1 cycle, got {val}"
     dut._log.info("MOD-01 PASS  data_ready pulse = exactly 1 cycle")
