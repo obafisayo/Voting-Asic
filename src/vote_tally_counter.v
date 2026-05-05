@@ -12,51 +12,36 @@ module vote_tally_counter (
 reg [31:0] counter [0:7];
 
 // 2. Edge detection for vote_en (rising edge)
-reg vote_en_d;   // delayed version
-
+reg vote_en_d;
 wire vote_event;
 assign vote_event = vote_en & ~vote_en_d;
 
 // 3. Sequential logic
 integer i;
 
-always @(posedge clk)
+always @(posedge clk or negedge rst_n)
 begin
-    // Save previous vote_en state
-    vote_en_d <= vote_en;
-
     if (!rst_n)
     begin
-        // Reset all counters
-        for (i = 0; i < 8; i = i + 1)
-        begin
-            counter[i] <= 32'd0;
-        end
-
+        vote_en_d <= 1'b0;
         vote_cast <= 1'b0;
+        for (i = 0; i < 8; i = i + 1)
+            counter[i] <= 32'd0;
     end
     else
     begin
-        // Default: no handshake
+        vote_en_d <= vote_en;
         vote_cast <= 1'b0;
 
         if (vote_event)
         begin
-            // Candidate validity check (example: allow 0–7 fully)
-            // You can restrict later if needed
-
-            // Increment selected counter
             counter[candidate_sel] <= counter[candidate_sel] + 1;
-
-            // Signal completion (1-cycle pulse)
             vote_cast <= 1'b1;
         end
     end
 end
 
-//====================================================
 // 4. Read path (combinational)
-//====================================================
 assign tally_out = counter[candidate_sel];
 
 endmodule

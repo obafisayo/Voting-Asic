@@ -29,7 +29,7 @@ module tb ();
   wire VGND = 1'b0;
 `endif
 
-  tt_um_example user_project (
+  tt_um_voting_asic user_project (
 `ifdef GL_TEST
       .VPWR(VPWR),
       .VGND(VGND),
@@ -45,6 +45,23 @@ module tb ();
   );
 
 `ifndef GL_TEST
+  // ── MOD-01: UART Receiver (fast-baud standalone for unit tests) ────────────
+  // CLK_FREQ=10, BAUD_RATE=1  →  BAUD_DIV=10, HALF_BAUD=5
+  reg         uart_rx_in;
+  wire [19:0] uart_voter_id_out;
+  wire        uart_data_ready_out;
+
+  mod01_uart_rx #(
+      .CLK_FREQ(10),
+      .BAUD_RATE(1)
+  ) uart_inst (
+      .clk          (clk),
+      .rst_n        (rst_n),
+      .rx           (uart_rx_in),
+      .voter_id_out (uart_voter_id_out),
+      .data_ready   (uart_data_ready_out)
+  );
+
   // ── MOD-03: Duplicate Vote Checker ─────────────────────────
   reg  [19:0] dc_voter_id;
   reg         dc_check_en;
