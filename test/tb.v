@@ -45,6 +45,27 @@ module tb ();
   );
 
 `ifndef GL_TEST
+  // ── MOD-01: UART Receiver (fast-baud standalone for unit tests) ────────────
+  // CLK_FREQ=20, BAUD_RATE=1  →  BAUD_DIV=20, HALF_BAUD=10
+  // 20 clocks/bit instead of real 434 cycles/bit (50 MHz / 115200 baud).
+  // BAUD_DIV must be ≥14: the DATA state samples every BAUD_DIV+1 cycles
+  // (one extra clock for baud_cnt reload), so with BAUD_DIV=10 the 8th
+  // sample falls into the stop-bit region and bit 7 is always read as 1.
+  reg         uart_rx_in;
+  wire [19:0] uart_voter_id_out;
+  wire        uart_data_ready_out;
+
+  mod01_uart_rx #(
+      .CLK_FREQ(20),
+      .BAUD_RATE(1)
+  ) uart_inst (
+      .clk          (clk),
+      .rst_n        (rst_n),
+      .rx           (uart_rx_in),
+      .voter_id_out (uart_voter_id_out),
+      .data_ready   (uart_data_ready_out)
+  );
+
   // ── MOD-03: Duplicate Vote Checker ─────────────────────────
   reg  [19:0] dc_voter_id;
   reg         dc_check_en;

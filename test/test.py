@@ -16,6 +16,15 @@ VALID_IDS   = [0xA0001, 0xA0002, 0xA0003, 0xA0004,
                0xB0001, 0xB0002, 0xC0001, 0xD0099]
 INVALID_IDS = [0x00000, 0xFFFFF, 0x12345, 0xA0005, 0xD0098]
 
+# Standalone UART instance parameters (tb.v uart_inst: CLK_FREQ=20, BAUD_RATE=1)
+# BAUD_DIV = CLK_FREQ / BAUD_RATE = 20 clocks per bit.
+# Why 20 and not 10: with BAUD_DIV=10 the DATA state samples every BAUD_DIV+1=11
+# cycles (one extra clock for the baud_cnt reload), so bit 7 is sampled 11 cycles
+# after its ideal center.  The stop bit enters rx_sync 2 cycles after it is driven,
+# meaning the UART reads the stop bit (always 1) as bit 7 — corrupting every byte.
+# BAUD_DIV≥14 keeps bit 7 within the valid window; 20 gives comfortable margin.
+FAST_BAUD_DIV = 20
+
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
@@ -25,6 +34,7 @@ async def reset(dut):
     dut.ui_in.value  = 0
     dut.uio_in.value = 0
     if not GL_TEST:
+        dut.uart_rx_in.value        = 1    # UART line idle-high between transmissions
         dut.dc_voter_id.value       = 0
         dut.dc_check_en.value       = 0
         dut.vtc_vote_en.value       = 0
@@ -35,22 +45,32 @@ async def reset(dut):
     await ClockCycles(dut.clk, 2)
 
 
-# ── MOD-02 helpers ─────────────────────────────────────────────────────────────
+# ── MOD-02 / integration helpers ───────────────────────────────────────────────
 
 async def load_voter_id(dut, voter_id):
-    """Stream a 20-bit voter ID into the TT wrapper using the two-write protocol."""
-    low_byte    =  voter_id        & 0xFF
-    mid_byte    = (voter_id >> 8)  & 0xFF
-    high_nibble = (voter_id >> 16) & 0xF
+    """Load a 20-bit voter ID into the TT wrapper via the byte-write bus.
 
-    # Write 1: voter_id[7:0]  — byte_sel=01, byte_write=1
+    Two-cycle parallel write protocol:
+      Step 1: ui_in = voter_id[7:0],  uio_in = 0b0000_0101  (byte_sel=01, byte_write=1)
+      Step 2: ui_in = voter_id[15:8], uio_in = (voter_id[18:16]<<4)|0b0000_0110
+              Note: uio_in[7] is the UART_RX line, so voter_id[19] is not
+              writable via this path.  All 8 master-list IDs have bit 19 = 1,
+              so use the UART path (uart_send_voter_id via uio_in[7]) for full
+              20-bit delivery; use this path for the 19-bit ids that match
+              because the validator uses all 20 bits (bit 19 stays 0 here).
+    """
+    low_byte    =  voter_id        & 0xFF
+    mid_byte    = (voter_id >>  8) & 0xFF
+    high_nibble = (voter_id >> 16) & 0xF   # voter_id[19:16]; bit19=1 keeps uio[7]=1 (UART idle)
+
+    # Write 1: voter_id[7:0]
     dut.ui_in.value  = low_byte
-    dut.uio_in.value = 0b00000101
+    dut.uio_in.value = 0b00000101           # byte_sel=01, byte_write=1
     await RisingEdge(dut.clk)
 
-    # Write 2: voter_id[15:8] via ui_in, voter_id[19:16] via uio_in[7:4]
+    # Write 2: voter_id[15:8] + voter_id[19:16] via uio_in[7:4]
     dut.ui_in.value  = mid_byte
-    dut.uio_in.value = (high_nibble << 4) | 0b00000110
+    dut.uio_in.value = (high_nibble << 4) | 0b00000110  # byte_sel=10, byte_write=1
     await RisingEdge(dut.clk)
 
     # Deassert write strobe
@@ -64,18 +84,18 @@ async def validate(dut, candidate=0):
 
     Pipeline timing (valid path):
       posedge N   : data_ready sampled, IDLE→VALIDATING, MOD-02 stage1 latches ID
-      posedge N+1 : state stays VALIDATING; MOD-02 fires validate_done NBA; next_state→CHECKING
-      posedge N+2 : state→CHECKING, check_en registered-pulse fires
-      posedge N+3 : state stays CHECKING; MOD-03 fires check_done NBA; next_state→VOTE_CAST
+      posedge N+1 : state stays VALIDATING; MOD-02 fires validate_done NBA
+      posedge N+2 : state→CHECKING, check_en pulse fires
+      posedge N+3 : state stays CHECKING; MOD-03 fires check_done NBA
       posedge N+4 : state→VOTE_CAST, vote_en high
       posedge N+5 : state→IDLE
-      ReadWrite N+6 (before N+6 NBAs): state = IDLE from N+5 NBA ✓
+      ReadWrite N+6: state = IDLE from N+5 NBA ✓
 
     Invalid path reaches IDLE at posedge N+3 — also settled by ReadWrite N+6.
     """
-    dut.ui_in.value  = candidate & 0x7  # candidate_sel for this vote
+    dut.ui_in.value  = candidate & 0x7  # candidate_sel
     dut.uio_in.value = 0b00001000       # data_ready = uio_in[3]
-    await RisingEdge(dut.clk)           # posedge N: data_ready sampled
+    await RisingEdge(dut.clk)           # posedge N
     dut.uio_in.value = 0
     await ClockCycles(dut.clk, 6)       # ReadWrite N+6: full pipeline settled
     out = int(dut.uo_out.value)
@@ -87,14 +107,10 @@ async def validate(dut, candidate=0):
 # ── MOD-03 helper ──────────────────────────────────────────────────────────────
 
 async def check_voter(dut, voter_id):
-    """Assert check_en for one cycle; return (is_duplicate, check_done).
-
-    check_done is set directly in cycle N's NBA, so it is readable at
-    cycle N+1's ReadWrite phase — hence ClockCycles(1).
-    """
+    """Assert check_en for one cycle on the standalone dc_inst; return (is_duplicate, check_done)."""
     dut.dc_voter_id.value = voter_id
     dut.dc_check_en.value = 1
-    await RisingEdge(dut.clk)           # Cycle N: check_en sampled, NBA sets outputs
+    await RisingEdge(dut.clk)
     dut.dc_check_en.value = 0
     await ClockCycles(dut.clk, 1)       # N+1 ReadWrite: N's NBAs visible
     return bool(int(dut.dc_is_duplicate.value)), bool(int(dut.dc_check_done.value))
@@ -103,17 +119,49 @@ async def check_voter(dut, voter_id):
 # ── MOD-04 helper ──────────────────────────────────────────────────────────────
 
 async def cast_vote(dut, candidate):
-    """Pulse vote_en for one cycle; return (tally_count, vote_cast).
-
-    vote_cast and the counter increment are both set in cycle N's NBA,
-    readable at cycle N+1's ReadWrite — hence ClockCycles(1).
-    """
+    """Pulse vote_en on the standalone vtc_inst; return (tally_count, vote_cast)."""
     dut.vtc_candidate_sel.value = candidate
-    dut.vtc_vote_en.value       = 1     # 0→1 rising edge triggers vote_event
-    await RisingEdge(dut.clk)           # Cycle N: NBA increments counter, sets vote_cast
+    dut.vtc_vote_en.value       = 1
+    await RisingEdge(dut.clk)
     dut.vtc_vote_en.value       = 0
-    await ClockCycles(dut.clk, 1)       # N+1 ReadWrite: N's NBAs visible
+    await ClockCycles(dut.clk, 1)
     return int(dut.vtc_tally_out.value), bool(int(dut.vtc_vote_cast.value))
+
+
+# ── MOD-01 UART helpers ────────────────────────────────────────────────────────
+
+async def uart_send_byte(dut, byte_val):
+    """Drive one 8N1 frame on uart_rx_in at FAST_BAUD_DIV clocks/bit.
+
+    Bit order: start bit (low), 8 data bits LSB-first, stop bit (high),
+    then one extra BAUD_DIV idle period.
+
+    WHY the idle gap: with BAUD_DIV=10 the UART STOP-state counter takes
+    107 cycles from frame start to fire byte_done, but 10 bits × 10 clocks
+    = 100 cycles.  Without the gap the next start bit arrives 7 cycles
+    before the UART returns to IDLE, so frame N+1's start-bit detection is
+    delayed and all sample points shift by ~1 bit, corrupting the byte.
+    One extra BAUD_DIV (10 clocks) of idle is enough margin.
+    """
+    dut.uart_rx_in.value = 0                        # start bit
+    await ClockCycles(dut.clk, FAST_BAUD_DIV)
+    for i in range(8):
+        dut.uart_rx_in.value = (byte_val >> i) & 1  # data bits LSB first
+        await ClockCycles(dut.clk, FAST_BAUD_DIV)
+    dut.uart_rx_in.value = 1                         # stop bit + idle
+    await ClockCycles(dut.clk, FAST_BAUD_DIV * 2)   # stop bit (1×) + idle gap (1×)
+
+
+async def uart_send_voter_id(dut, voter_id):
+    """Transmit a 20-bit voter ID as 3 successive 8N1 frames.
+
+    Frame 0: voter_id[7:0]    (low byte)
+    Frame 1: voter_id[15:8]   (mid byte)
+    Frame 2: voter_id[19:16]  (high nibble, upper 4 bits ignored by receiver)
+    """
+    await uart_send_byte(dut, voter_id & 0xFF)
+    await uart_send_byte(dut, (voter_id >> 8) & 0xFF)
+    await uart_send_byte(dut, (voter_id >> 16) & 0xF)
 
 
 # ── MOD-02 tests ───────────────────────────────────────────────────────────────
@@ -194,7 +242,7 @@ async def test_duplicate_checker_first_vote(dut):
 
 @cocotb.test(skip=GL_TEST)
 async def test_duplicate_checker_second_vote(dut):
-    """MOD-03: submitting the same voter ID twice within one session must be blocked."""
+    """MOD-03: submitting the same voter ID twice must be blocked."""
     dut._log.info("test_duplicate_checker_second_vote")
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
@@ -212,7 +260,7 @@ async def test_duplicate_checker_second_vote(dut):
 
 @cocotb.test(skip=GL_TEST)
 async def test_duplicate_checker_new_vs_repeat(dut):
-    """MOD-03: fresh ID accepted then blocked on repeat — within a single test."""
+    """MOD-03: fresh ID accepted then blocked on repeat."""
     dut._log.info("test_duplicate_checker_new_vs_repeat")
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
@@ -260,8 +308,8 @@ async def test_vote_tally_multiple_candidates(dut):
     for _ in range(3):
         await cast_vote(dut, candidate=5)
 
-    tally1, _ = await cast_vote(dut, candidate=1)   # one more → should be 3 total
-    tally5, _ = await cast_vote(dut, candidate=5)   # one more → should be 4 total
+    tally1, _ = await cast_vote(dut, candidate=1)
+    tally5, _ = await cast_vote(dut, candidate=5)
 
     assert tally1 == 3, f"Candidate 1: expected 3 votes, got {tally1}"
     assert tally5 == 4, f"Candidate 5: expected 4 votes, got {tally5}"
@@ -277,9 +325,8 @@ async def test_vote_tally_no_spurious_votes(dut):
     await reset(dut)
 
     dut.vtc_candidate_sel.value = 2
-    dut.vtc_vote_en.value       = 1        # 0→1 edge
-    await RisingEdge(dut.clk)              # vote_event fires
-    # Hold vote_en high for 3 more cycles — must NOT produce extra votes
+    dut.vtc_vote_en.value       = 1
+    await RisingEdge(dut.clk)
     await ClockCycles(dut.clk, 3)
     dut.vtc_vote_en.value = 0
     await ClockCycles(dut.clk, 1)
@@ -289,11 +336,11 @@ async def test_vote_tally_no_spurious_votes(dut):
     dut._log.info(f"MOD-04 PASS  candidate=2 tally={tally} (no spurious counts)")
 
 
-# ── FSM integration tests (via TT wrapper) ────────────────────────────────────
+# ── FSM integration tests (via TT wrapper) ─────────────────────────────────────
 
 @cocotb.test()
 async def test_fsm_invalid_path(dut):
-    """Integration: invalid voter ID must put FSM into INVALID state (status=101)."""
+    """Integration: invalid voter ID must reach INVALID state then return to IDLE."""
     dut._log.info("test_fsm_invalid_path")
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
@@ -302,10 +349,9 @@ async def test_fsm_invalid_path(dut):
     await load_voter_id(dut, 0x12345)
     id_valid, pipeline_done, out = await validate(dut)
 
-    assert pipeline_done,  "FSM did not return to IDLE after INVALID ID"
-    assert not id_valid,   "INVALID ID must not set id_valid"
-    is_dup = bool(out & 0x10)
-    assert not is_dup,     "is_duplicate must stay 0 for invalid ID (checker never ran)"
+    assert pipeline_done, "FSM did not return to IDLE after INVALID ID"
+    assert not id_valid,  "INVALID ID must not set id_valid"
+    assert not bool(out & 0x10), "is_duplicate must stay 0 (duplicate checker never ran)"
     dut._log.info(f"FSM PASS  0x12345  id_valid={id_valid}  pipeline_done={pipeline_done}")
 
 
@@ -317,55 +363,118 @@ async def test_fsm_duplicate_path(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    vid = 0xC0001   # valid, registered
+    vid = 0xC0001
 
-    # First vote — must be accepted
     await load_voter_id(dut, vid)
     id_valid1, done1, out1 = await validate(dut)
     assert done1 and id_valid1, f"First vote for {vid:#07x} should be accepted"
-    is_dup1 = bool(out1 & 0x10)
-    assert not is_dup1, "First vote must NOT set is_duplicate"
+    assert not bool(out1 & 0x10), "First vote must NOT set is_duplicate"
     dut._log.info(f"FSM PASS  {vid:#07x}  first vote accepted")
 
-    # Second vote — same ID, must be blocked
     await load_voter_id(dut, vid)
     id_valid2, done2, out2 = await validate(dut)
-    assert done2,      "FSM must return to IDLE after DUPLICATE"
-    assert id_valid2,  "id_valid must still be 1 (voter is registered, just already voted)"
-    is_dup2 = bool(out2 & 0x10)
-    assert is_dup2,    "Second vote must set is_duplicate"
+    assert done2,     "FSM must return to IDLE after DUPLICATE"
+    assert id_valid2, "id_valid must still be 1 (voter is registered, just already voted)"
+    assert bool(out2 & 0x10), "Second vote must set is_duplicate"
     dut._log.info(f"FSM PASS  {vid:#07x}  second vote blocked (is_duplicate=1)")
 
 
 @cocotb.test()
 async def test_tally_readback(dut):
-    """Integration: after voting for a candidate, uo_out[7:5] shows the correct tally."""
+    """Integration: after voting, uo_out[7:5] reflects the correct candidate tally."""
     dut._log.info("test_tally_readback")
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    # Vote for candidate 5 with voter 0xB0002
     await load_voter_id(dut, 0xB0002)
     id_valid, done, _ = await validate(dut, candidate=5)
     assert done and id_valid, "Vote should be accepted"
 
-    # In IDLE, set ui_in[2:0]=5 to select candidate 5's counter
     dut.ui_in.value = 5
     await ClockCycles(dut.clk, 1)
-    out = int(dut.uo_out.value)
-    tally = (out >> 5) & 0x7        # uo_out[7:5]
+    tally = (int(dut.uo_out.value) >> 5) & 0x7
     assert tally == 1, f"Expected tally=1 for candidate 5, got {tally}"
     dut._log.info(f"Tally PASS  candidate=5  tally={tally}")
 
-    # Vote again for candidate 5 with voter 0xD0099
     await load_voter_id(dut, 0xD0099)
     id_valid2, done2, _ = await validate(dut, candidate=5)
     assert done2 and id_valid2
 
     dut.ui_in.value = 5
     await ClockCycles(dut.clk, 1)
-    out2 = int(dut.uo_out.value)
-    tally2 = (out2 >> 5) & 0x7
+    tally2 = (int(dut.uo_out.value) >> 5) & 0x7
     assert tally2 == 2, f"Expected tally=2 for candidate 5 after second vote, got {tally2}"
     dut._log.info(f"Tally PASS  candidate=5  tally={tally2} after 2 votes")
+
+
+# ── MOD-01 UART unit tests ─────────────────────────────────────────────────────
+#
+# These test the standalone uart_inst in tb.v (CLK_FREQ=10, BAUD_RATE=1,
+# BAUD_DIV=10 clocks/bit).  Each 8N1 frame = 10 bits × 10 clocks = 100 clocks.
+# Three frames = 300 clocks total driven by uart_send_voter_id.
+#
+# WHY we do NOT use `await RisingEdge(dut.uart_data_ready_out)`:
+# Icarus Verilog's VPI layer does not reliably fire value-change callbacks on
+# `wire` nets that are outputs of a submodule instance accessed hierarchically.
+# The callback is registered but never triggers, causing the test to hang
+# indefinitely.  The fix is straightforward: send all frames sequentially,
+# then wait a fixed number of extra cycles for the UART hardware to finish
+# processing the last stop bit and for the frame assembler to latch the result.
+
+@cocotb.test(skip=GL_TEST)
+async def test_uart_receive_voter_id(dut):
+    """MOD-01: 3-frame UART assembly must produce the correct 20-bit voter_id_out."""
+    dut._log.info("test_uart_receive_voter_id")
+    clock = Clock(dut.clk, 10, unit="us")
+    cocotb.start_soon(clock.start())
+    await reset(dut)
+
+    dut.uart_rx_in.value = 1           # idle high before transmission
+    await ClockCycles(dut.clk, 2)
+
+    target_id = 0xA0003
+    await uart_send_voter_id(dut, target_id)
+
+    # uart_send_voter_id returns after the idle gap at the end of frame 2.
+    # The frame assembler sets voter_id_out during that idle gap, so the
+    # value is already stable when we return.  Wait 2 extra cycles as margin.
+    await ClockCycles(dut.clk, 2)
+
+    received = int(dut.uart_voter_id_out.value)
+    assert received == target_id, (
+        f"UART assembled {received:#07x}, expected {target_id:#07x}"
+    )
+    dut._log.info(f"MOD-01 PASS  voter_id_out={received:#07x}")
+
+
+@cocotb.test(skip=GL_TEST)
+async def test_uart_data_ready_one_cycle(dut):
+    """MOD-01: data_ready must pulse high for exactly one clock cycle."""
+    dut._log.info("test_uart_data_ready_one_cycle")
+    clock = Clock(dut.clk, 10, unit="us")
+    cocotb.start_soon(clock.start())
+    await reset(dut)
+
+    dut.uart_rx_in.value = 1
+    await ClockCycles(dut.clk, 2)
+
+    # Send in the background so we can poll data_ready concurrently.
+    # data_ready pulses during the idle gap at the end of the last frame —
+    # before uart_send_voter_id returns — so we must be polling WHILE
+    # the send is still in progress.
+    cocotb.start_soon(uart_send_voter_id(dut, 0xB0001))
+
+    # Poll for 720 cycles (3 frames × 220 cycles + 60 margin).
+    # data_ready is high for exactly 1 cycle; count how many polls see it.
+    # (RisingEdge cannot be used here — see note above.)
+    high_cycles = 0
+    for _ in range(720):
+        await ClockCycles(dut.clk, 1)
+        if int(dut.uart_data_ready_out.value) == 1:
+            high_cycles += 1
+
+    assert high_cycles == 1, (
+        f"data_ready was high for {high_cycles} cycle(s), expected exactly 1"
+    )
+    dut._log.info("MOD-01 PASS  data_ready pulse = exactly 1 cycle")
