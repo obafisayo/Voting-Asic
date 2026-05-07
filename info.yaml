@@ -18,7 +18,6 @@ project:
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "project.v"
-    - "mod01_uart_rx.v"
     - "voter_id_validator.v"
     - "duplicate_checker.v"
     - "vote_tally_counter.v"
@@ -61,7 +60,7 @@ pinout:
   uio[4]: "voter_id[16]"
   uio[5]: "voter_id[17]"
   uio[6]: "voter_id[18]"
-  uio[7]: "voter_id[19] / UART_RX"
+  uio[7]: "voter_id[19]"
 
 # Do not change!
 yaml_version: 6

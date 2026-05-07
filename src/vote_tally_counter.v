@@ -1,3 +1,5 @@
+`default_nettype none
+
 module vote_tally_counter (
     input wire clk,
     input wire rst_n,

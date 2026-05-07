@@ -25,7 +25,6 @@ async def reset(dut):
     dut.ui_in.value  = 0
     dut.uio_in.value = 0
     if not GL_TEST:
-        dut.uart_rx_in.value        = 1    # UART idle = high
         dut.dc_voter_id.value       = 0
         dut.dc_check_en.value       = 0
         dut.vtc_vote_en.value       = 0
@@ -39,7 +38,7 @@ async def reset(dut):
 # ── MOD-02 helpers ─────────────────────────────────────────────────────────────
 
 async def load_voter_id(dut, voter_id):
-    """Stream a 20-bit voter ID into the MOD-02 wrapper using the two-write protocol."""
+    """Stream a 20-bit voter ID into the TT wrapper using the two-write protocol."""
     low_byte    =  voter_id        & 0xFF
     mid_byte    = (voter_id >> 8)  & 0xFF
     high_nibble = (voter_id >> 16) & 0xF
@@ -185,7 +184,6 @@ async def test_duplicate_checker_first_vote(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    # Use IDs from the master list — the new synthesizable impl only tracks these
     test_ids = [0xA0001, 0xA0002, 0xA0003]
     for vid in test_ids:
         is_dup, done = await check_voter(dut, vid)
@@ -202,7 +200,6 @@ async def test_duplicate_checker_second_vote(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    # Submit 0xA0004 once (accepted), then again (blocked) — self-contained test.
     vid = 0xA0004
     is_dup, done = await check_voter(dut, vid)
     assert done and not is_dup, f"First vote for {vid:#07x} should not be duplicate"
@@ -258,7 +255,6 @@ async def test_vote_tally_multiple_candidates(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    # Cast 2 votes for candidate 1, 3 votes for candidate 5
     for _ in range(2):
         await cast_vote(dut, candidate=1)
     for _ in range(3):
@@ -280,7 +276,6 @@ async def test_vote_tally_no_spurious_votes(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    # Rising edge on candidate 2 → expect exactly 1 vote
     dut.vtc_candidate_sel.value = 2
     dut.vtc_vote_en.value       = 1        # 0→1 edge
     await RisingEdge(dut.clk)              # vote_event fires
@@ -304,7 +299,6 @@ async def test_fsm_invalid_path(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    # Use an ID that is not in the master list
     await load_voter_id(dut, 0x12345)
     id_valid, pipeline_done, out = await validate(dut)
 
@@ -358,7 +352,7 @@ async def test_tally_readback(dut):
 
     # In IDLE, set ui_in[2:0]=5 to select candidate 5's counter
     dut.ui_in.value = 5
-    await ClockCycles(dut.clk, 1)   # let combinational tally_out settle
+    await ClockCycles(dut.clk, 1)
     out = int(dut.uo_out.value)
     tally = (out >> 5) & 0x7        # uo_out[7:5]
     assert tally == 1, f"Expected tally=1 for candidate 5, got {tally}"
@@ -375,82 +369,3 @@ async def test_tally_readback(dut):
     tally2 = (out2 >> 5) & 0x7
     assert tally2 == 2, f"Expected tally=2 for candidate 5 after second vote, got {tally2}"
     dut._log.info(f"Tally PASS  candidate=5  tally={tally2} after 2 votes")
-
-
-# ── MOD-01 UART unit tests (standalone fast-baud instance) ───────────────────
-
-# BAUD parameters matching tb.v uart_inst: CLK_FREQ=10, BAUD_RATE=1 → BAUD_DIV=10
-FAST_BAUD_DIV  = 10
-FAST_HALF_BAUD = FAST_BAUD_DIV // 2
-
-
-async def uart_send_byte(dut, byte_val):
-    """Send one 8N1 UART byte on the standalone UART instance's rx pin."""
-    # Start bit (low)
-    dut.uart_rx_in.value = 0
-    await ClockCycles(dut.clk, FAST_BAUD_DIV)
-    # 8 data bits LSB first
-    for i in range(8):
-        dut.uart_rx_in.value = (byte_val >> i) & 1
-        await ClockCycles(dut.clk, FAST_BAUD_DIV)
-    # Stop bit (high)
-    dut.uart_rx_in.value = 1
-    await ClockCycles(dut.clk, FAST_BAUD_DIV)
-
-
-async def uart_send_voter_id(dut, voter_id):
-    """Transmit a 20-bit voter ID as 3 UART frames to the standalone instance."""
-    await uart_send_byte(dut, voter_id & 0xFF)          # frame 0: bits [7:0]
-    await uart_send_byte(dut, (voter_id >> 8) & 0xFF)   # frame 1: bits [15:8]
-    await uart_send_byte(dut, (voter_id >> 16) & 0xF)   # frame 2: bits [19:16]
-
-
-@cocotb.test(skip=GL_TEST)
-async def test_uart_receive_voter_id(dut):
-    """MOD-01: 3-frame UART assembly must produce the correct voter_id_out."""
-    dut._log.info("test_uart_receive_voter_id")
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset(dut)
-
-    dut.uart_rx_in.value = 1    # UART idle (high)
-    await ClockCycles(dut.clk, 2)
-
-    target_id = 0xA0003
-    # Start transmission in background so we can await data_ready independently
-    cocotb.start_soon(uart_send_voter_id(dut, target_id))
-
-    # Wait for data_ready to pulse — resolves as soon as the NBA commits
-    await RisingEdge(dut.uart_data_ready_out)
-    # voter_id_out was set by the same NBA that drove data_ready high
-    received = int(dut.uart_voter_id_out.value)
-    assert received == target_id, (
-        f"UART assembled {received:#07x}, expected {target_id:#07x}"
-    )
-    dut._log.info(f"MOD-01 PASS  voter_id_out={received:#07x}")
-
-
-@cocotb.test(skip=GL_TEST)
-async def test_uart_data_ready_one_cycle(dut):
-    """MOD-01: data_ready must pulse high for exactly one clock cycle."""
-    dut._log.info("test_uart_data_ready_one_cycle")
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset(dut)
-
-    dut.uart_rx_in.value = 1
-    await ClockCycles(dut.clk, 2)
-
-    cocotb.start_soon(uart_send_voter_id(dut, 0xB0001))
-
-    # Catch the rising edge of data_ready
-    await RisingEdge(dut.uart_data_ready_out)
-    assert int(dut.uart_data_ready_out.value) == 1, "data_ready not high at rising edge"
-
-    # data_ready was set at posedge P's NBA.  The always block unconditionally
-    # schedules data_ready <= 0 at posedge P+1.  We need ReadWrite P+2 to see
-    # that NBA committed; ReadWrite P+1 is before P+1's NBAs so still reads 1.
-    await ClockCycles(dut.clk, 2)
-    val = int(dut.uart_data_ready_out.value)
-    assert val == 0, f"data_ready should be 0 after 1 cycle, got {val}"
-    dut._log.info("MOD-01 PASS  data_ready pulse = exactly 1 cycle")
